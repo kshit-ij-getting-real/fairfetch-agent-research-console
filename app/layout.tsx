@@ -1,9 +1,10 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { APP_STRINGS } from "@/src/strings";
 
 export const metadata: Metadata = {
-  title: "MacroScout Agent Console",
-  description: "Financial Research Agent Console for FairFetch token and receipt flows"
+  title: APP_STRINGS.metadata.title,
+  description: APP_STRINGS.metadata.description
 };
 
 export default function RootLayout({
