@@ -56,6 +56,7 @@ export default function Home() {
 
   const [researchUrl, setResearchUrl] = useState(defaultUrl);
   const [license, setLicense] = useState<LicenseType>("SUMMARY");
+  const [useLicensedPublisherUrl, setUseLicensedPublisherUrl] = useState(false);
   const [maxPriceMicros, setMaxPriceMicros] = useState("");
 
   const [mintLoading, setMintLoading] = useState(false);
@@ -68,7 +69,35 @@ export default function Home() {
   const [contentPreview, setContentPreview] = useState("");
   const [contentDebug, setContentDebug] = useState<unknown>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
+  const [proofCopied, setProofCopied] = useState(false);
   const [runs, setRuns] = useState<StoredRun[]>([]);
+
+  const requestUrl = useMemo(() => {
+    if (!useLicensedPublisherUrl) {
+      return researchUrl;
+    }
+
+    try {
+      const url = new URL(researchUrl);
+      url.searchParams.set("via", "fairfetch");
+      url.searchParams.set("license", license);
+      return url.toString();
+    } catch {
+      const separator = researchUrl.includes("?") ? "&" : "?";
+      const withVia = `${researchUrl}${separator}via=fairfetch`;
+      return `${withVia}&license=${license}`;
+    }
+  }, [license, researchUrl, useLicensedPublisherUrl]);
+
+  const isLicensedRequest = useMemo(() => {
+    try {
+      const url = new URL(requestUrl);
+      return url.searchParams.get("via") === "fairfetch";
+    } catch {
+      const params = new URLSearchParams(requestUrl.split("?")[1] ?? "");
+      return params.get("via") === "fairfetch";
+    }
+  }, [requestUrl]);
 
   useEffect(() => {
     const raw = localStorage.getItem("fairfetch-research-runs");
@@ -89,14 +118,14 @@ export default function Home() {
 
   const mintBody = useMemo(() => {
     const body: { url: string; license: LicenseType; maxPriceMicros?: number } = {
-      url: researchUrl,
+      url: requestUrl,
       license
     };
     if (maxPriceMicros.trim()) {
       body.maxPriceMicros = Number(maxPriceMicros);
     }
     return body;
-  }, [license, maxPriceMicros, researchUrl]);
+  }, [license, maxPriceMicros, requestUrl]);
 
   async function mintToken() {
     setMintLoading(true);
@@ -168,7 +197,7 @@ export default function Home() {
     setContentDebug(null);
     setContentPreview("");
 
-    const queryUrl = encodeURIComponent(researchUrl);
+    const queryUrl = encodeURIComponent(requestUrl);
     const directEndpoint = `${backendUrl.replace(/\/$/, "")}/api/content?url=${queryUrl}`;
     const proxyEndpoint = `/api/proxy/content?url=${queryUrl}&backendUrl=${encodeURIComponent(backendUrl)}`;
 
@@ -220,7 +249,7 @@ export default function Home() {
         setReceipt(candidateReceipt);
         saveRun({
           id: `${candidateReceipt.txId}-${candidateReceipt.timestamp}`,
-          url: researchUrl,
+          url: requestUrl,
           license,
           userAgent,
           agentLabel,
@@ -239,7 +268,7 @@ export default function Home() {
   const proofBlock = receipt
     ? [
         `${APP_STRINGS.receipt.helperName}: ${agentLabel}`,
-        `${APP_STRINGS.receipt.sourceUrl}: ${researchUrl}`,
+        `${APP_STRINGS.receipt.sourceUrl}: ${requestUrl}`,
         `${APP_STRINGS.receipt.accessType}: ${license}`,
         `${APP_STRINGS.receipt.amount}: ${receipt.priceMicros}`,
         `${APP_STRINGS.receipt.reference}: ${receipt.txId}`,
@@ -284,7 +313,11 @@ export default function Home() {
           <h2 className="text-lg font-semibold">{APP_STRINGS.target.title}</h2>
           <div className="mt-4 grid gap-3 md:grid-cols-3">
             <label className="text-sm md:col-span-3">{APP_STRINGS.target.url}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={researchUrl} onChange={(e) => setResearchUrl(e.target.value)} />
+              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={requestUrl} onChange={(e) => setResearchUrl(e.target.value)} />
+            </label>
+            <label className="flex items-center gap-2 text-sm md:col-span-3">
+              <input type="checkbox" checked={useLicensedPublisherUrl} onChange={(e) => setUseLicensedPublisherUrl(e.target.checked)} />
+              <span>Use licensed publisher URL</span>
             </label>
             <label className="text-sm">{APP_STRINGS.target.license}
               <select className="mt-1 w-full rounded bg-slate-950 p-2" value={license} onChange={(e) => setLicense(e.target.value as LicenseType)}>
@@ -329,6 +362,11 @@ export default function Home() {
           {redeemStatus && <p className="mt-3 text-sm text-slate-300">{redeemStatus}</p>}
           {contentPreview ? (
             <div className="mt-4 rounded border border-slate-700 p-3">
+              <p className="text-sm text-cyan-300">
+                {isLicensedRequest
+                  ? "Publisher returned full body (licensed AI view)"
+                  : "Publisher returned preview (human paywall view)"}
+              </p>
               <h3 className="font-medium">{APP_STRINGS.content.previewTitle}</h3>
               <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{contentPreview}</pre>
             </div>
@@ -359,8 +397,15 @@ export default function Home() {
                 <li>{APP_STRINGS.receipt.bullet3}</li>
                 <li>{APP_STRINGS.receipt.bullet4}</li>
               </ul>
-              <button className="rounded bg-cyan-500 px-3 py-1 text-slate-950" onClick={() => navigator.clipboard.writeText(proofBlock)}>
-                {APP_STRINGS.receipt.copyCta}
+              <button
+                className="rounded bg-cyan-500 px-3 py-1 text-slate-950"
+                onClick={async () => {
+                  await navigator.clipboard.writeText(proofBlock);
+                  setProofCopied(true);
+                  window.setTimeout(() => setProofCopied(false), 1500);
+                }}
+              >
+                {proofCopied ? "Copied" : APP_STRINGS.receipt.copyCta}
               </button>
             </div>
           ) : (
