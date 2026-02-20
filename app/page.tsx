@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { APP_STRINGS } from "@/src/strings";
 
 type LicenseType = "SUMMARY" | "DISPLAY";
 
-type TokenResponse = {
+type MintResponse = {
   token?: string;
   [key: string]: unknown;
 };
@@ -15,442 +14,728 @@ type Receipt = {
   priceMicros: number;
   domain: string;
   path: string;
+  license?: LicenseType;
   timestamp: string;
   [key: string]: unknown;
 };
 
-type ContentResponse = {
+type RedeemResponse = {
   content?: unknown;
   receipt?: Receipt;
   [key: string]: unknown;
 };
 
-type StoredRun = {
+type RunRecord = {
   id: string;
-  url: string;
+  timestamp: string;
+  targetUrl: string;
+  requestUrl: string;
   license: LicenseType;
-  userAgent: string;
   agentLabel: string;
+  userAgent: string;
   receipt: Receipt;
+  contentPreview: string;
 };
 
-const defaultBackend = process.env.NEXT_PUBLIC_FAIRFETCH_BACKEND_URL ?? "";
-const defaultUrl =
-  process.env.NEXT_PUBLIC_DEFAULT_RESEARCH_URL ??
-  "https://ai-essays.vercel.app/premium/demo-article";
+type TechnicalState = {
+  mintStatus?: number;
+  redeemStatus?: number;
+  mintError?: string;
+  redeemError?: string;
+  requestId?: string;
+  mintRaw?: unknown;
+  redeemRaw?: unknown;
+};
 
-function prettyJson(data: unknown): string {
-  return JSON.stringify(data, null, 2);
+const LOCAL_STORAGE_SETTINGS_KEY = "fairfetch-demo-settings";
+const LOCAL_STORAGE_RUNS_KEY = "fairfetch-demo-runs";
+
+const DEFAULT_TARGETS = [
+  "https://fairfetch-publisher-macro-notes.vercel.app/premium/demo-article",
+  "https://fairfetch-publisher-macro-notes.vercel.app/premium/fed-liquidity-watch",
+  "https://fairfetch-publisher-macro-notes.vercel.app/premium/india-fii-flows"
+];
+
+const defaultBackendUrl = process.env.NEXT_PUBLIC_FAIRFETCH_BACKEND_URL ?? "";
+
+function safeJsonParse(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
 
-function maskToken(token: string): string {
-  if (token.length <= 10) return token;
-  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+function maskApiKey(value: string) {
+  if (!value) return "Not set";
+  if (value.length < 8) return "••••";
+  return `${value.slice(0, 3)}••••${value.slice(-3)}`;
 }
 
-export default function Home() {
-  const [backendUrl, setBackendUrl] = useState(defaultBackend);
+function buildLicensedUrl(url: string, license: LicenseType, useMarker: boolean) {
+  if (!useMarker) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.set("via", "fairfetch");
+    parsed.searchParams.set("license", license);
+    return parsed.toString();
+  } catch {
+    const [base, query = ""] = url.split("?");
+    const params = new URLSearchParams(query);
+    params.set("via", "fairfetch");
+    params.set("license", license);
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
+  }
+}
+
+function extractContentSnippet(content: unknown) {
+  if (typeof content === "string") {
+    return content.slice(0, 900);
+  }
+  if (content == null) {
+    return "No content returned.";
+  }
+  return JSON.stringify(content, null, 2).slice(0, 900);
+}
+
+function pretty(value: unknown) {
+  return JSON.stringify(value, null, 2);
+}
+
+async function parseResponse(response: Response) {
+  const text = await response.text();
+  const maybeJson = safeJsonParse(text);
+  return {
+    text,
+    data: maybeJson ?? text
+  };
+}
+
+function mapErrorMessage(status: number, body: unknown) {
+  const bodyText = typeof body === "string" ? body.toLowerCase() : JSON.stringify(body).toLowerCase();
+  if (status === 401 || status === 403) return "API key not accepted. Create a new key and try again.";
+  if (bodyText.includes("pricing") || bodyText.includes("rule")) {
+    return "No active pricing rule matches this domain, path, and license. Create a pricing rule under Publisher Pricing, then try again.";
+  }
+  if (status === 422 && bodyText.includes("max")) return "Price exceeds your max price limit.";
+  if (status === 409 && bodyText.includes("max")) return "Price exceeds your max price limit.";
+  return "Request failed. Open technical details for more context.";
+}
+
+export default function Page() {
+  const [backendUrl, setBackendUrl] = useState(defaultBackendUrl);
   const [apiKey, setApiKey] = useState("");
+  const [agentLabel, setAgentLabel] = useState("MacroScout Agent");
   const [userAgent, setUserAgent] = useState("MacroScout/1.0");
-  const [agentLabel, setAgentLabel] = useState("MacroScout Helper");
 
-  const [researchUrl, setResearchUrl] = useState(defaultUrl);
+  const [targetUrl, setTargetUrl] = useState(DEFAULT_TARGETS[0]);
   const [license, setLicense] = useState<LicenseType>("SUMMARY");
-  const [useLicensedPublisherUrl, setUseLicensedPublisherUrl] = useState(false);
-  const [maxPriceMicros, setMaxPriceMicros] = useState("");
+  const [useLicensedMarker, setUseLicensedMarker] = useState(true);
+  const [maxPriceMicros, setMaxPriceMicros] = useState("600000");
 
-  const [mintLoading, setMintLoading] = useState(false);
-  const [redeemLoading, setRedeemLoading] = useState(false);
-  const [mintStatus, setMintStatus] = useState("");
-  const [redeemStatus, setRedeemStatus] = useState("");
+  const [running, setRunning] = useState(false);
+  const [stepState, setStepState] = useState<{ mint: boolean; fetch: boolean; receipt: boolean }>({
+    mint: false,
+    fetch: false,
+    receipt: false
+  });
 
-  const [token, setToken] = useState("");
-  const [mintDebug, setMintDebug] = useState<unknown>(null);
   const [contentPreview, setContentPreview] = useState("");
-  const [contentDebug, setContentDebug] = useState<unknown>(null);
   const [receipt, setReceipt] = useState<Receipt | null>(null);
-  const [proofCopied, setProofCopied] = useState(false);
-  const [runs, setRuns] = useState<StoredRun[]>([]);
+  const [latestRun, setLatestRun] = useState<RunRecord | null>(null);
+  const [recentRuns, setRecentRuns] = useState<RunRecord[]>([]);
 
-  const requestUrl = useMemo(() => {
-    if (!useLicensedPublisherUrl) {
-      return researchUrl;
-    }
+  const [statusMessage, setStatusMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [copiedReceipt, setCopiedReceipt] = useState(false);
+  const [copiedProof, setCopiedProof] = useState(false);
+  const [copiedTxId, setCopiedTxId] = useState(false);
 
-    try {
-      const url = new URL(researchUrl);
-      url.searchParams.set("via", "fairfetch");
-      url.searchParams.set("license", license);
-      return url.toString();
-    } catch {
-      const separator = researchUrl.includes("?") ? "&" : "?";
-      const withVia = `${researchUrl}${separator}via=fairfetch`;
-      return `${withVia}&license=${license}`;
-    }
-  }, [license, researchUrl, useLicensedPublisherUrl]);
-
-  const isLicensedRequest = useMemo(() => {
-    try {
-      const url = new URL(requestUrl);
-      return url.searchParams.get("via") === "fairfetch";
-    } catch {
-      const params = new URLSearchParams(requestUrl.split("?")[1] ?? "");
-      return params.get("via") === "fairfetch";
-    }
-  }, [requestUrl]);
+  const [technical, setTechnical] = useState<TechnicalState>({});
+  const [connectionState, setConnectionState] = useState("Idle");
 
   useEffect(() => {
-    const raw = localStorage.getItem("fairfetch-research-runs");
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as StoredRun[];
-      setRuns(parsed.slice(0, 5));
-    } catch {
-      localStorage.removeItem("fairfetch-research-runs");
+    const rawSettings = localStorage.getItem(LOCAL_STORAGE_SETTINGS_KEY);
+    const rawRuns = localStorage.getItem(LOCAL_STORAGE_RUNS_KEY);
+
+    if (rawSettings) {
+      const parsed = safeJsonParse(rawSettings) as Partial<{
+        backendUrl: string;
+        apiKey: string;
+        agentLabel: string;
+        userAgent: string;
+      }> | null;
+
+      if (parsed) {
+        if (typeof parsed.backendUrl === "string") setBackendUrl(parsed.backendUrl);
+        if (typeof parsed.apiKey === "string") setApiKey(parsed.apiKey);
+        if (typeof parsed.agentLabel === "string") setAgentLabel(parsed.agentLabel);
+        if (typeof parsed.userAgent === "string") setUserAgent(parsed.userAgent);
+      }
+    }
+
+    if (rawRuns) {
+      const parsedRuns = safeJsonParse(rawRuns) as RunRecord[] | null;
+      if (Array.isArray(parsedRuns)) setRecentRuns(parsedRuns.slice(0, 5));
     }
   }, []);
 
-  const saveRun = (nextRun: StoredRun) => {
-    const nextRuns = [nextRun, ...runs].slice(0, 5);
-    setRuns(nextRuns);
-    localStorage.setItem("fairfetch-research-runs", JSON.stringify(nextRuns));
+  const requestUrl = useMemo(
+    () => buildLicensedUrl(targetUrl, license, useLicensedMarker),
+    [targetUrl, license, useLicensedMarker]
+  );
+
+  const viewLabel = useMemo(() => {
+    try {
+      const u = new URL(requestUrl);
+      return u.searchParams.get("via") === "fairfetch" ? "Licensed AI view" : "Human paywall preview";
+    } catch {
+      return requestUrl.includes("via=fairfetch") ? "Licensed AI view" : "Human paywall preview";
+    }
+  }, [requestUrl]);
+
+  const requestDetails = useMemo(() => {
+    const base = backendUrl.replace(/\/$/, "");
+    return {
+      mint: {
+        method: "POST",
+        endpoint: `${base}/api/tokens`,
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": maskApiKey(apiKey),
+          "User-Agent": userAgent
+        }
+      },
+      redeem: {
+        method: "GET",
+        endpoint: `${base}/api/content?url=${encodeURIComponent(requestUrl)}`,
+        headers: {
+          "x-fairfetch-token": "minted token"
+        }
+      }
+    };
+  }, [backendUrl, apiKey, requestUrl, userAgent]);
+
+  const saveSettings = () => {
+    localStorage.setItem(
+      LOCAL_STORAGE_SETTINGS_KEY,
+      JSON.stringify({ backendUrl, apiKey, agentLabel, userAgent })
+    );
+    setStatusMessage("Settings saved locally.");
   };
 
-  const mintBody = useMemo(() => {
-    const body: { url: string; license: LicenseType; maxPriceMicros?: number } = {
+  const saveRun = (run: RunRecord) => {
+    const nextRuns = [run, ...recentRuns.filter((item) => item.id !== run.id)].slice(0, 5);
+    setRecentRuns(nextRuns);
+    localStorage.setItem(LOCAL_STORAGE_RUNS_KEY, JSON.stringify(nextRuns));
+  };
+
+  const resetCopyFlags = () => {
+    setCopiedProof(false);
+    setCopiedReceipt(false);
+    setCopiedTxId(false);
+  };
+
+  const runLicensedFetch = async () => {
+    setRunning(true);
+    setStatusMessage("");
+    setErrorMessage("");
+    setStepState({ mint: false, fetch: false, receipt: false });
+    setTechnical({});
+    resetCopyFlags();
+
+    const mintBody: { url: string; license: LicenseType; maxPriceMicros?: number } = {
       url: requestUrl,
       license
     };
-    if (maxPriceMicros.trim()) {
-      body.maxPriceMicros = Number(maxPriceMicros);
-    }
-    return body;
-  }, [license, maxPriceMicros, requestUrl]);
+    if (maxPriceMicros.trim()) mintBody.maxPriceMicros = Number(maxPriceMicros);
 
-  async function mintToken() {
-    setMintLoading(true);
-    setMintStatus("");
-    setMintDebug(null);
+    const directMintUrl = `${backendUrl.replace(/\/$/, "")}/api/tokens`;
+    const directRedeemUrl = `${backendUrl.replace(/\/$/, "")}/api/content?url=${encodeURIComponent(requestUrl)}`;
 
-    const directEndpoint = `${backendUrl.replace(/\/$/, "")}/api/tokens`;
-    const proxyEndpoint = "/api/proxy/tokens";
+    try {
+      setStatusMessage("Quoting and minting token...");
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "User-Agent": userAgent
-    };
-
-    async function doRequest(endpoint: string, viaProxy: boolean): Promise<Response> {
-      if (viaProxy) {
-        return fetch(endpoint, {
+      let mintResponse: Response;
+      let mintedViaProxy = false;
+      try {
+        mintResponse = await fetch(directMintUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "User-Agent": userAgent,
+            "x-agent-label": agentLabel
+          },
+          body: JSON.stringify(mintBody)
+        });
+      } catch {
+        mintedViaProxy = true;
+        mintResponse = await fetch("/api/proxy/tokens", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ backendUrl, headers, body: mintBody })
+          body: JSON.stringify({
+            backendUrl,
+            apiKey,
+            userAgent,
+            agentLabel,
+            body: mintBody
+          })
         });
       }
 
-      return fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(mintBody)
-      });
-    }
+      const mintParsed = await parseResponse(mintResponse);
+      const mintRequestId = mintResponse.headers.get("x-request-id") ?? undefined;
 
-    try {
-      let response: Response;
+      setTechnical((prev) => ({
+        ...prev,
+        mintStatus: mintResponse.status,
+        mintRaw: mintParsed.data,
+        requestId: mintRequestId ?? prev.requestId
+      }));
+
+      if (!mintResponse.ok) {
+        setErrorMessage(mapErrorMessage(mintResponse.status, mintParsed.data));
+        setTechnical((prev) => ({ ...prev, mintError: mintParsed.text }));
+        setRunning(false);
+        return;
+      }
+
+      const minted = mintParsed.data as MintResponse;
+      if (!minted.token) {
+        setErrorMessage("Token mint completed but no token was returned.");
+        setTechnical((prev) => ({ ...prev, mintError: mintParsed.text }));
+        setRunning(false);
+        return;
+      }
+
+      setStepState((prev) => ({ ...prev, mint: true }));
+      setStatusMessage(mintedViaProxy ? "Token minted through proxy fallback." : "Token minted.");
+
+      setStatusMessage("Fetching licensed content...");
+
+      let redeemResponse: Response;
+      let redeemViaProxy = false;
       try {
-        response = await doRequest(directEndpoint, false);
-      } catch {
-        response = await doRequest(proxyEndpoint, true);
-        setMintStatus(APP_STRINGS.credit.fallback);
-      }
-
-      const data = await response
-        .json()
-        .catch(() => ({ error: "Could not read the response details" }));
-      setMintDebug(data);
-
-      if (!response.ok) {
-        setMintStatus(`${APP_STRINGS.credit.fail} (Code ${response.status})`);
-        return;
-      }
-
-      const parsed = data as TokenResponse;
-      if (!parsed.token) {
-        setMintStatus(APP_STRINGS.credit.missing);
-        return;
-      }
-
-      setToken(parsed.token);
-      setMintStatus(APP_STRINGS.credit.success);
-    } catch {
-      setMintStatus(APP_STRINGS.credit.requestError);
-    } finally {
-      setMintLoading(false);
-    }
-  }
-
-  async function redeemContent() {
-    setRedeemLoading(true);
-    setRedeemStatus("");
-    setContentDebug(null);
-    setContentPreview("");
-
-    const queryUrl = encodeURIComponent(requestUrl);
-    const directEndpoint = `${backendUrl.replace(/\/$/, "")}/api/content?url=${queryUrl}`;
-    const proxyEndpoint = `/api/proxy/content?url=${queryUrl}&backendUrl=${encodeURIComponent(backendUrl)}`;
-
-    async function doRequest(endpoint: string, viaProxy: boolean): Promise<Response> {
-      if (viaProxy) {
-        return fetch(endpoint, {
+        redeemResponse = await fetch(directRedeemUrl, {
           method: "GET",
-          headers: { "x-fairfetch-token": token }
+          headers: {
+            "x-fairfetch-token": minted.token
+          }
+        });
+      } catch {
+        redeemViaProxy = true;
+        const redeemProxyUrl = `/api/proxy/content?${new URLSearchParams({ url: requestUrl, backendUrl }).toString()}`;
+        redeemResponse = await fetch(redeemProxyUrl, {
+          method: "GET",
+          headers: {
+            "x-fairfetch-token": minted.token
+          }
         });
       }
 
-      return fetch(endpoint, {
-        method: "GET",
-        headers: { "x-fairfetch-token": token }
-      });
-    }
+      const redeemParsed = await parseResponse(redeemResponse);
+      const redeemRequestId = redeemResponse.headers.get("x-request-id") ?? undefined;
 
-    try {
-      let response: Response;
-      try {
-        response = await doRequest(directEndpoint, false);
-      } catch {
-        response = await doRequest(proxyEndpoint, true);
-        setRedeemStatus(APP_STRINGS.content.fallback);
-      }
+      setTechnical((prev) => ({
+        ...prev,
+        redeemStatus: redeemResponse.status,
+        redeemRaw: redeemParsed.data,
+        requestId: redeemRequestId ?? prev.requestId
+      }));
 
-      const data = await response
-        .json()
-        .catch(() => ({ error: "Could not read the response details" }));
-      setContentDebug(data);
-
-      if (!response.ok) {
-        setRedeemStatus(`${APP_STRINGS.content.fail} (Code ${response.status})`);
+      if (!redeemResponse.ok) {
+        setErrorMessage(mapErrorMessage(redeemResponse.status, redeemParsed.data));
+        setTechnical((prev) => ({ ...prev, redeemError: redeemParsed.text }));
+        setRunning(false);
         return;
       }
 
-      const parsed = data as ContentResponse;
-      const candidateContent = parsed.content ?? data;
-      const candidateReceipt = parsed.receipt;
+      setStepState((prev) => ({ ...prev, fetch: true }));
 
-      const previewText =
-        typeof candidateContent === "string"
-          ? candidateContent.slice(0, 1000)
-          : prettyJson(candidateContent).slice(0, 1000);
+      const redeemed = redeemParsed.data as RedeemResponse;
+      const snippet = extractContentSnippet(redeemed.content ?? redeemed);
+      const nextReceipt = redeemed.receipt;
 
-      setContentPreview(previewText);
-
-      if (candidateReceipt) {
-        setReceipt(candidateReceipt);
-        saveRun({
-          id: `${candidateReceipt.txId}-${candidateReceipt.timestamp}`,
-          url: requestUrl,
-          license,
-          userAgent,
-          agentLabel,
-          receipt: candidateReceipt
-        });
+      if (!nextReceipt) {
+        setErrorMessage("Content returned without receipt metadata.");
+        setRunning(false);
+        return;
       }
 
-      setRedeemStatus(APP_STRINGS.content.success);
-    } catch {
-      setRedeemStatus(APP_STRINGS.content.requestError);
+      const receiptWithLicense: Receipt = { ...nextReceipt, license };
+      setReceipt(receiptWithLicense);
+      setContentPreview(snippet.slice(0, 900));
+      setStepState({ mint: true, fetch: true, receipt: true });
+      setStatusMessage(redeemViaProxy ? "Content fetched through proxy fallback." : "Receipt written.");
+
+      const run: RunRecord = {
+        id: `${receiptWithLicense.txId}-${receiptWithLicense.timestamp}`,
+        timestamp: receiptWithLicense.timestamp,
+        targetUrl,
+        requestUrl,
+        license,
+        agentLabel,
+        userAgent,
+        receipt: receiptWithLicense,
+        contentPreview: snippet.slice(0, 900)
+      };
+      setLatestRun(run);
+      saveRun(run);
+    } catch (error) {
+      setErrorMessage("Network issue while calling FairFetch. Proxy fallback also failed.");
+      setTechnical((prev) => ({ ...prev, redeemError: String(error) }));
     } finally {
-      setRedeemLoading(false);
+      setRunning(false);
     }
-  }
+  };
 
   const proofBlock = receipt
     ? [
-        `${APP_STRINGS.receipt.helperName}: ${agentLabel}`,
-        `${APP_STRINGS.receipt.sourceUrl}: ${requestUrl}`,
-        `${APP_STRINGS.receipt.accessType}: ${license}`,
-        `${APP_STRINGS.receipt.amount}: ${receipt.priceMicros}`,
-        `${APP_STRINGS.receipt.reference}: ${receipt.txId}`,
-        `${APP_STRINGS.receipt.time}: ${receipt.timestamp}`,
-        `${APP_STRINGS.receipt.appName}: ${userAgent}`
+        `AgentLabel: ${latestRun?.agentLabel ?? agentLabel}`,
+        `UserAgent: ${latestRun?.userAgent ?? userAgent}`,
+        `URL: ${latestRun?.requestUrl ?? requestUrl}`,
+        `License: ${receipt.license ?? license}`,
+        `priceMicros: ${receipt.priceMicros}`,
+        `txId: ${receipt.txId}`,
+        `timestamp: ${receipt.timestamp}`
       ].join("\n")
     : "";
 
+  const receiptBlock = receipt
+    ? [
+        `txId: ${receipt.txId}`,
+        `priceMicros: ${receipt.priceMicros}`,
+        `domain: ${receipt.domain}`,
+        `path: ${receipt.path}`,
+        `license: ${receipt.license ?? license}`,
+        `timestamp: ${receipt.timestamp}`
+      ].join("\n")
+    : "";
+
+  const testConnection = async () => {
+    if (!backendUrl) {
+      setConnectionState("Enter a backend URL first.");
+      return;
+    }
+
+    setConnectionState("Checking...");
+    try {
+      const url = `${backendUrl.replace(/\/$/, "")}/api/content?url=${encodeURIComponent("https://example.com")}`;
+      const response = await fetch(url, { method: "GET" });
+      setConnectionState(`Reachable. HTTP ${response.status}`);
+    } catch {
+      try {
+        const proxyUrl = `/api/proxy/content?${new URLSearchParams({
+          url: "https://example.com",
+          backendUrl
+        }).toString()}`;
+        const proxyResponse = await fetch(proxyUrl, { method: "GET" });
+        setConnectionState(`Reachable through proxy. HTTP ${proxyResponse.status}`);
+      } catch {
+        setConnectionState("Connection failed.");
+      }
+    }
+  };
+
   return (
-    <main className="mx-auto min-h-screen max-w-6xl px-6 py-10">
-      <header className="mb-8 border-b border-slate-800 pb-5">
-        <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">{APP_STRINGS.header.eyebrow}</p>
-        <h1 className="mt-2 text-3xl font-semibold">{APP_STRINGS.header.title}</h1>
-        <div className="mt-4 rounded-lg border border-slate-700 bg-slate-900/60 p-4 text-sm text-slate-200">
-          <p className="font-semibold text-cyan-200">{APP_STRINGS.header.introTitle}</p>
-          {APP_STRINGS.header.introLines.map((line) => (
-            <p key={line} className="mt-1">{line}</p>
-          ))}
-        </div>
+    <main className="mx-auto min-h-screen max-w-5xl px-4 py-8 text-slate-100 sm:px-6">
+      <header className="mb-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-6">
+        <h1 className="text-3xl font-semibold">MacroScout Research Agent</h1>
+        <p className="mt-2 text-sm text-slate-300">
+          Fetch premium research via FairFetch licensing and receive a receipt.
+        </p>
       </header>
 
-      <div className="space-y-6">
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.setup.title}</h2>
-          <div className="mt-4 grid gap-3 md:grid-cols-2">
-            <label className="text-sm">{APP_STRINGS.setup.backendUrl}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={backendUrl} onChange={(e) => setBackendUrl(e.target.value)} />
-            </label>
-            <label className="text-sm">{APP_STRINGS.setup.apiKey}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-            </label>
-            <label className="text-sm">{APP_STRINGS.setup.userAgent}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={userAgent} onChange={(e) => setUserAgent(e.target.value)} />
-            </label>
-            <label className="text-sm">{APP_STRINGS.setup.helperLabel}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={agentLabel} onChange={(e) => setAgentLabel(e.target.value)} />
-            </label>
-          </div>
-        </section>
+      <section className="rounded-2xl border border-cyan-700/50 bg-slate-900/70 p-5">
+        <h2 className="text-xl font-semibold">Demo run</h2>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.target.title}</h2>
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <label className="text-sm md:col-span-3">{APP_STRINGS.target.url}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={requestUrl} onChange={(e) => setResearchUrl(e.target.value)} />
-            </label>
-            <label className="flex items-center gap-2 text-sm md:col-span-3">
-              <input type="checkbox" checked={useLicensedPublisherUrl} onChange={(e) => setUseLicensedPublisherUrl(e.target.checked)} />
-              <span>Use licensed publisher URL</span>
-            </label>
-            <label className="text-sm">{APP_STRINGS.target.license}
-              <select className="mt-1 w-full rounded bg-slate-950 p-2" value={license} onChange={(e) => setLicense(e.target.value as LicenseType)}>
-                <option value="SUMMARY">{APP_STRINGS.target.summary}</option>
-                <option value="DISPLAY">{APP_STRINGS.target.display}</option>
-              </select>
-            </label>
-            <label className="text-sm">{APP_STRINGS.target.maxPrice}
-              <input className="mt-1 w-full rounded bg-slate-950 p-2" value={maxPriceMicros} onChange={(e) => setMaxPriceMicros(e.target.value)} />
-            </label>
-          </div>
-        </section>
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <label className="text-sm md:col-span-2">
+            Target report
+            <input
+              list="target-options"
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2"
+              value={targetUrl}
+              onChange={(event) => setTargetUrl(event.target.value)}
+            />
+            <datalist id="target-options">
+              {DEFAULT_TARGETS.map((url) => (
+                <option key={url} value={url} />
+              ))}
+            </datalist>
+          </label>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.credit.title}</h2>
-          <button className="mt-4 rounded bg-cyan-500 px-4 py-2 font-medium text-slate-950 disabled:opacity-60" onClick={mintToken} disabled={mintLoading || !backendUrl || !apiKey}>
-            {mintLoading ? APP_STRINGS.credit.ctaBusy : APP_STRINGS.credit.ctaIdle}
-          </button>
-          {mintStatus && <p className="mt-3 text-sm text-slate-300">{mintStatus}</p>}
-          <p className="mt-2 rounded border border-amber-600/40 bg-amber-950/40 p-2 text-sm text-amber-200">
-            {APP_STRINGS.credit.warning}
-          </p>
-          {token && (
-            <div className="mt-4 rounded border border-slate-700 p-3 text-sm">
-              <p>{APP_STRINGS.credit.passLabel}: <span className="font-mono">{maskToken(token)}</span></p>
-              <button className="mt-2 rounded bg-slate-700 px-3 py-1" onClick={() => navigator.clipboard.writeText(token)}>
-                {APP_STRINGS.credit.copyCta}
-              </button>
-            </div>
-          )}
-          <details className="mt-4">
-            <summary className="cursor-pointer text-sm text-cyan-300">{APP_STRINGS.credit.detailsSummary}</summary>
-            <pre className="mt-2 overflow-auto rounded bg-slate-950 p-3 text-xs">{prettyJson(mintDebug)}</pre>
-          </details>
-        </section>
+          <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-950 p-3 text-sm md:col-span-2">
+            <input
+              type="checkbox"
+              checked={useLicensedMarker}
+              onChange={(event) => setUseLicensedMarker(event.target.checked)}
+            />
+            Use licensed access marker
+          </label>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.content.title}</h2>
-          <button className="mt-4 rounded bg-emerald-500 px-4 py-2 font-medium text-slate-950 disabled:opacity-60" onClick={redeemContent} disabled={redeemLoading || !backendUrl || !token}>
-            {redeemLoading ? APP_STRINGS.content.ctaBusy : APP_STRINGS.content.ctaIdle}
-          </button>
-          {redeemStatus && <p className="mt-3 text-sm text-slate-300">{redeemStatus}</p>}
-          {contentPreview ? (
-            <div className="mt-4 rounded border border-slate-700 p-3">
-              <p className="text-sm text-cyan-300">
-                {isLicensedRequest
-                  ? "Publisher returned full body (licensed AI view)"
-                  : "Publisher returned preview (human paywall view)"}
-              </p>
-              <h3 className="font-medium">{APP_STRINGS.content.previewTitle}</h3>
-              <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-slate-200">{contentPreview}</pre>
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-slate-400">{APP_STRINGS.content.empty}</p>
-          )}
-          <details className="mt-4">
-            <summary className="cursor-pointer text-sm text-emerald-300">{APP_STRINGS.content.detailsSummary}</summary>
-            <pre className="mt-2 overflow-auto rounded bg-slate-950 p-3 text-xs">{prettyJson(contentDebug)}</pre>
-          </details>
-        </section>
+          <label className="text-sm">
+            License type
+            <select
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2"
+              value={license}
+              onChange={(event) => setLicense(event.target.value as LicenseType)}
+            >
+              <option value="SUMMARY">SUMMARY</option>
+              <option value="DISPLAY">DISPLAY</option>
+            </select>
+          </label>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.receipt.title}</h2>
-          <h3 className="mt-2 text-xl font-semibold text-cyan-300">{APP_STRINGS.receipt.subtitle}</h3>
-          {receipt ? (
-            <div className="mt-4 space-y-3 rounded-lg border border-cyan-500/50 bg-slate-950 p-4">
-              <div className="grid gap-2 text-sm md:grid-cols-2">
-                <p><span className="text-slate-400">{APP_STRINGS.receipt.reference}:</span> <span className="font-mono">{receipt.txId}</span></p>
-                <p><span className="text-slate-400">{APP_STRINGS.receipt.amount}:</span> {receipt.priceMicros}</p>
-                <p><span className="text-slate-400">Domain:</span> {receipt.domain}</p>
-                <p><span className="text-slate-400">Path:</span> {receipt.path}</p>
-                <p className="md:col-span-2"><span className="text-slate-400">{APP_STRINGS.receipt.time}:</span> {receipt.timestamp}</p>
+          <label className="text-sm">
+            Max price micros
+            <input
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2"
+              value={maxPriceMicros}
+              onChange={(event) => setMaxPriceMicros(event.target.value)}
+            />
+          </label>
+        </div>
+
+        <p className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300">
+          Final request URL: <span className="font-mono">{requestUrl}</span>
+        </p>
+
+        <button
+          className="mt-4 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-60"
+          onClick={runLicensedFetch}
+          disabled={running || !backendUrl || !apiKey || !targetUrl}
+        >
+          {running ? "Running..." : "Run licensed fetch"}
+        </button>
+
+        <div className="mt-4 grid gap-2 text-sm">
+          <p>{stepState.mint ? "✅" : "⬜"} 1) Quote and mint token</p>
+          <p>{stepState.fetch ? "✅" : "⬜"} 2) Fetch content</p>
+          <p>{stepState.receipt ? "✅" : "⬜"} 3) Receipt written</p>
+        </div>
+
+        {statusMessage && <p className="mt-3 text-sm text-emerald-300">{statusMessage}</p>}
+        {errorMessage && (
+          <div className="mt-3 rounded-lg border border-rose-700 bg-rose-950/40 p-3 text-sm text-rose-200">
+            <p>{errorMessage}</p>
+            <details className="mt-2">
+              <summary className="cursor-pointer text-rose-100">Show technical details</summary>
+              <div className="mt-2 space-y-2 text-xs">
+                <p>Mint status: {technical.mintStatus ?? "N/A"}</p>
+                <p>Redeem status: {technical.redeemStatus ?? "N/A"}</p>
+                <p>Request id: {technical.requestId ?? "N/A"}</p>
+                {(technical.mintError || technical.redeemError) && (
+                  <pre className="overflow-auto rounded bg-slate-950 p-2">
+                    {technical.mintError ?? ""}
+                    {technical.redeemError ? `\n${technical.redeemError}` : ""}
+                  </pre>
+                )}
               </div>
-              <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
-                <li>{APP_STRINGS.receipt.bullet1}</li>
-                <li>{APP_STRINGS.receipt.bullet2}</li>
-                <li>{APP_STRINGS.receipt.bullet3}</li>
-                <li>{APP_STRINGS.receipt.bullet4}</li>
-              </ul>
-              <button
-                className="rounded bg-cyan-500 px-3 py-1 text-slate-950"
-                onClick={async () => {
-                  await navigator.clipboard.writeText(proofBlock);
-                  setProofCopied(true);
-                  window.setTimeout(() => setProofCopied(false), 1500);
-                }}
-              >
-                {proofCopied ? "Copied" : APP_STRINGS.receipt.copyCta}
-              </button>
-            </div>
-          ) : (
-            <p className="mt-3 text-sm text-slate-400">{APP_STRINGS.receipt.empty}</p>
-          )}
-        </section>
-
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.verify.title}</h2>
-          <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-300">
-            <li>{APP_STRINGS.verify.bullet1}</li>
-            <li>{APP_STRINGS.verify.bullet2}</li>
-            <li>{APP_STRINGS.verify.bullet3}</li>
-          </ul>
-          <div className="mt-3 flex flex-wrap gap-2 text-sm">
-            <a className="rounded border border-slate-700 px-3 py-1 text-cyan-300" href="https://dashboard.fairfetch.ai" target="_blank">{APP_STRINGS.verify.consumerLink}</a>
-            <a className="rounded border border-slate-700 px-3 py-1 text-cyan-300" href="https://publisher.fairfetch.ai" target="_blank">{APP_STRINGS.verify.publisherLink}</a>
+            </details>
           </div>
-        </section>
+        )}
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold">{APP_STRINGS.history.title}</h2>
-          <div className="mt-3 space-y-2 text-sm">
-            {runs.length === 0 && <p className="text-slate-400">{APP_STRINGS.history.empty}</p>}
-            {runs.map((run) => (
+        {(receipt || contentPreview) && (
+          <div className="mt-6 grid gap-4 lg:grid-cols-2">
+            <article className="rounded-xl border border-slate-700 bg-slate-950 p-4">
+              <h3 className="text-lg font-semibold">Returned content</h3>
+              <p className="mt-1 text-xs text-cyan-300">{viewLabel}</p>
+              <p className="mt-3 whitespace-pre-wrap text-sm text-slate-200">{contentPreview}</p>
+            </article>
+
+            <article className="rounded-xl border border-cyan-600 bg-cyan-950/20 p-4">
+              <h3 className="text-lg font-semibold">Receipt</h3>
+              {receipt ? (
+                <div className="mt-3 space-y-1 text-sm">
+                  <p><span className="text-slate-400">txId:</span> <span className="font-mono">{receipt.txId}</span></p>
+                  <p><span className="text-slate-400">priceMicros:</span> {receipt.priceMicros}</p>
+                  <p><span className="text-slate-400">domain:</span> {receipt.domain}</p>
+                  <p><span className="text-slate-400">path:</span> {receipt.path}</p>
+                  <p><span className="text-slate-400">license:</span> {receipt.license ?? license}</p>
+                  <p><span className="text-slate-400">timestamp:</span> {receipt.timestamp}</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="rounded-lg border border-slate-500 px-3 py-1 text-xs"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(receiptBlock);
+                        setCopiedReceipt(true);
+                        setTimeout(() => setCopiedReceipt(false), 1200);
+                      }}
+                    >
+                      {copiedReceipt ? "Copied" : "Copy receipt"}
+                    </button>
+                    <button
+                      className="rounded-lg border border-cyan-500 px-3 py-1 text-xs"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(proofBlock);
+                        setCopiedProof(true);
+                        setTimeout(() => setCopiedProof(false), 1200);
+                      }}
+                    >
+                      {copiedProof ? "Copied" : "Copy proof block"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-300">Run a fetch to generate a receipt.</p>
+              )}
+            </article>
+          </div>
+        )}
+      </section>
+
+      <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <h2 className="text-lg font-semibold">Show this next</h2>
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-300">
+          <li>Publisher Transactions should show the same txId</li>
+          <li>AI Usage and Spend should update after redemption</li>
+        </ul>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            className="rounded-lg border border-slate-600 px-3 py-1 text-xs"
+            disabled={!receipt?.txId}
+            onClick={async () => {
+              if (!receipt?.txId) return;
+              await navigator.clipboard.writeText(receipt.txId);
+              setCopiedTxId(true);
+              setTimeout(() => setCopiedTxId(false), 1200);
+            }}
+          >
+            {copiedTxId ? "Copied" : "Copy txId"}
+          </button>
+          <a className="text-xs text-cyan-300 underline" href="https://dashboard.fairfetch.ai" target="_blank">
+            Consumer dashboard
+          </a>
+          <a className="text-xs text-cyan-300 underline" href="https://publisher.fairfetch.ai" target="_blank">
+            Publisher dashboard
+          </a>
+        </div>
+      </section>
+
+      <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <details>
+          <summary className="cursor-pointer text-lg font-semibold">Advanced controls</summary>
+          <div className="mt-4 space-y-4">
+            <div className="rounded-xl border border-slate-700 bg-slate-950 p-4">
+              <h3 className="font-semibold">Setup</h3>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <label className="text-sm md:col-span-2">
+                  Backend URL
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2"
+                    value={backendUrl}
+                    onChange={(event) => setBackendUrl(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm">
+                  API key
+                  <input
+                    type="password"
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2"
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm">
+                  Agent label
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2"
+                    value={agentLabel}
+                    onChange={(event) => setAgentLabel(event.target.value)}
+                  />
+                </label>
+                <label className="text-sm md:col-span-2">
+                  User agent
+                  <input
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2"
+                    value={userAgent}
+                    onChange={(event) => setUserAgent(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button className="rounded-lg bg-slate-700 px-3 py-1 text-sm" onClick={saveSettings}>Save</button>
+                <button className="rounded-lg border border-slate-500 px-3 py-1 text-sm" onClick={testConnection}>
+                  Test connection
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-slate-300">Connection status: {connectionState}</p>
+            </div>
+
+            <div className="rounded-xl border border-slate-700 bg-slate-950 p-4">
+              <h3 className="font-semibold">Request details</h3>
+              <div className="mt-2 space-y-3 text-xs text-slate-300">
+                <div>
+                  <p className="font-semibold text-slate-100">Mint request</p>
+                  <p>{requestDetails.mint.method} {requestDetails.mint.endpoint}</p>
+                  <pre className="mt-1 overflow-auto rounded bg-slate-900 p-2">{pretty(requestDetails.mint.headers)}</pre>
+                </div>
+                <div>
+                  <p className="font-semibold text-slate-100">Redeem request</p>
+                  <p>{requestDetails.redeem.method} {requestDetails.redeem.endpoint}</p>
+                  <pre className="mt-1 overflow-auto rounded bg-slate-900 p-2">{pretty(requestDetails.redeem.headers)}</pre>
+                </div>
+              </div>
+            </div>
+
+            <details className="rounded-xl border border-slate-700 bg-slate-950 p-4">
+              <summary className="cursor-pointer font-semibold">Technical details</summary>
+              <div className="mt-3 space-y-3 text-xs">
+                <p>Mint HTTP status: {technical.mintStatus ?? "N/A"}</p>
+                <p>Redeem HTTP status: {technical.redeemStatus ?? "N/A"}</p>
+                <p>Request id: {technical.requestId ?? "N/A"}</p>
+                <div>
+                  <p className="mb-1 font-semibold">Mint raw response</p>
+                  <pre className="max-h-64 overflow-auto rounded bg-slate-900 p-2">{pretty(technical.mintRaw ?? null)}</pre>
+                </div>
+                <div>
+                  <p className="mb-1 font-semibold">Redeem raw response</p>
+                  <pre className="max-h-64 overflow-auto rounded bg-slate-900 p-2">{pretty(technical.redeemRaw ?? null)}</pre>
+                </div>
+                {(technical.mintError || technical.redeemError) && (
+                  <div>
+                    <p className="mb-1 font-semibold">Error response bodies</p>
+                    <pre className="max-h-40 overflow-auto rounded bg-slate-900 p-2">
+                      {technical.mintError ?? ""}
+                      {technical.redeemError ? `\n${technical.redeemError}` : ""}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </details>
+          </div>
+        </details>
+      </section>
+
+      <section className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+        <h2 className="text-lg font-semibold">Recent runs</h2>
+        {recentRuns.length === 0 ? (
+          <p className="mt-2 text-sm text-slate-400">No runs yet.</p>
+        ) : (
+          <div className="mt-3 space-y-2">
+            {recentRuns.map((run) => (
               <button
                 key={run.id}
-                className="w-full rounded border border-slate-700 p-2 text-left hover:border-cyan-500"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-left text-sm hover:border-cyan-500"
                 onClick={() => {
-                  setResearchUrl(run.url);
+                  setTargetUrl(run.targetUrl);
                   setLicense(run.license);
-                  setUserAgent(run.userAgent);
-                  setAgentLabel(run.agentLabel);
                   setReceipt(run.receipt);
+                  setContentPreview(run.contentPreview);
+                  setLatestRun(run);
+                  setStatusMessage("Loaded a previous run.");
                 }}
               >
-                <p>{run.receipt.timestamp}</p>
-                <p className="text-slate-400">{run.receipt.domain}{run.receipt.path}</p>
-                <p className="font-mono text-xs text-slate-400">{run.receipt.priceMicros} µ • {run.receipt.txId}</p>
-                <p className="mt-1 text-xs text-cyan-300">{APP_STRINGS.history.itemHint}</p>
+                <p className="text-xs text-slate-400">{run.timestamp}</p>
+                <p>{run.receipt.domain}{run.receipt.path}</p>
+                <p className="font-mono text-xs text-slate-400">{run.receipt.priceMicros} micros · {run.receipt.txId}</p>
               </button>
             ))}
           </div>
-        </section>
-      </div>
+        )}
+      </section>
     </main>
   );
 }
