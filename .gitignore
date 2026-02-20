@@ -1,5 +1,6 @@
 .next
 node_modules
+next.config.ts
 .env*
 .DS_Store
 npm-debug.log*

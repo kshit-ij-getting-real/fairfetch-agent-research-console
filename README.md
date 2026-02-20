@@ -21,3 +21,7 @@ Set env vars:
 3. Redeem token for content and receipt.
 4. Show receipt as audit trail proof block.
 5. Persist last 5 research runs in localStorage.
+
+## Deployment note
+
+Vercel/Next.js 14 does not support `next.config.ts` during build. Keep configuration in `next.config.js` (or `next.config.mjs`) to avoid build failures.
