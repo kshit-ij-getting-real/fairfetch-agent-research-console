@@ -9,8 +9,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Missing backendUrl or url query parameters" }, { status: 400 });
     }
 
-    const url = `${backendUrl.replace(/\/$/, "")}/api/content?url=${contentUrl}`;
-    const response = await fetch(url, {
+    const params = new URLSearchParams({ url: contentUrl });
+    const endpoint = `${backendUrl.replace(/\/$/, "")}/api/content?${params.toString()}`;
+
+    const response = await fetch(endpoint, {
       method: "GET",
       headers: {
         "x-fairfetch-token": request.headers.get("x-fairfetch-token") ?? ""
@@ -20,7 +22,10 @@ export async function GET(request: NextRequest) {
     const text = await response.text();
     return new NextResponse(text, {
       status: response.status,
-      headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" }
+      headers: {
+        "Content-Type": response.headers.get("content-type") ?? "application/json",
+        "x-request-id": response.headers.get("x-request-id") ?? ""
+      }
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
