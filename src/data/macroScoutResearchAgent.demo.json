@@ -1,0 +1,132 @@
+{
+  "agentIdentity": {
+    "agentId": "agent_macroscout_research_001",
+    "name": "MacroScout Research Agent",
+    "owner": "FairFetch Labs",
+    "description": "AI research agent focused on macroeconomics signal discovery, synthesis, and citation-aware summaries.",
+    "model": "gpt-4.1-mini",
+    "createdAt": "2026-02-10T09:15:00Z",
+    "status": "active"
+  },
+  "apiKeys": [
+    {
+      "keyId": "key_live_01JMACROSCOUTA",
+      "label": "Production Console Key",
+      "maskedKey": "ff_live_9xK2••••••••••••Q1mP",
+      "createdAt": "2026-02-10T09:20:00Z",
+      "lastUsedAt": "2026-02-21T13:04:31Z",
+      "status": "active"
+    },
+    {
+      "keyId": "key_live_01JMACROSCOUTB",
+      "label": "Batch Ingestion Worker",
+      "maskedKey": "ff_live_C7rN••••••••••••v8Zd",
+      "createdAt": "2026-02-12T16:42:00Z",
+      "lastUsedAt": "2026-02-21T12:47:09Z",
+      "status": "active"
+    }
+  ],
+  "usageByDay": [
+    {
+      "date": "2026-02-15",
+      "runs": 19,
+      "summaryCalls": 13,
+      "displayCalls": 11,
+      "totalSpendMicros": 13200000
+    },
+    {
+      "date": "2026-02-16",
+      "runs": 23,
+      "summaryCalls": 17,
+      "displayCalls": 14,
+      "totalSpendMicros": 17600000
+    },
+    {
+      "date": "2026-02-17",
+      "runs": 27,
+      "summaryCalls": 21,
+      "displayCalls": 16,
+      "totalSpendMicros": 22400000
+    },
+    {
+      "date": "2026-02-18",
+      "runs": 25,
+      "summaryCalls": 18,
+      "displayCalls": 17,
+      "totalSpendMicros": 20900000
+    },
+    {
+      "date": "2026-02-19",
+      "runs": 31,
+      "summaryCalls": 24,
+      "displayCalls": 19,
+      "totalSpendMicros": 26800000
+    },
+    {
+      "date": "2026-02-20",
+      "runs": 34,
+      "summaryCalls": 26,
+      "displayCalls": 22,
+      "totalSpendMicros": 30100000
+    },
+    {
+      "date": "2026-02-21",
+      "runs": 29,
+      "summaryCalls": 22,
+      "displayCalls": 18,
+      "totalSpendMicros": 24700000
+    }
+  ],
+  "usageByDomain": [
+    {
+      "domain": "fairfetch-publisher-macro-notes.vercel.app",
+      "summarySpendMicros": 58600000,
+      "displaySpendMicros": 29700000,
+      "totalSpendMicros": 88300000
+    },
+    {
+      "domain": "ai-essays.vercel.app",
+      "summarySpendMicros": 43400000,
+      "displaySpendMicros": 24400000,
+      "totalSpendMicros": 67800000
+    }
+  ],
+  "recentRuns": [
+    {
+      "txId": "tx_01JMN2P8Y6Q4N7C2RA6D9B1H3F",
+      "timestamp": "2026-02-21T13:02:11Z",
+      "domain": "fairfetch-publisher-macro-notes.vercel.app",
+      "path": "/notes/fed-liquidity-regime-shift",
+      "license": "SUMMARY",
+      "priceMicros": 2100000,
+      "status": "paid"
+    },
+    {
+      "txId": "tx_01JMN2NQ3D5W8E1VT7K4X9M2ZR",
+      "timestamp": "2026-02-21T12:49:37Z",
+      "domain": "ai-essays.vercel.app",
+      "path": "/essays/term-premium-repricing-2026",
+      "license": "DISPLAY",
+      "priceMicros": 1700000,
+      "status": "paid"
+    },
+    {
+      "txId": "tx_01JMN2J4S8B3U5L0CF2Y6Q7WKA",
+      "timestamp": "2026-02-21T12:31:04Z",
+      "domain": "fairfetch-publisher-macro-notes.vercel.app",
+      "path": "/briefs/china-credit-impulse-watch",
+      "license": "DISPLAY",
+      "priceMicros": 1600000,
+      "status": "paid"
+    },
+    {
+      "txId": "tx_01JMN2C9H2P6R4N8DY5T1V3XQE",
+      "timestamp": "2026-02-21T12:08:55Z",
+      "domain": "ai-essays.vercel.app",
+      "path": "/essays/us-core-pce-nowcast-breakdown",
+      "license": "SUMMARY",
+      "priceMicros": 2300000,
+      "status": "paid"
+    }
+  ]
+}
